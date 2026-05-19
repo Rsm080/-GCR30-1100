@@ -30,7 +30,8 @@ The driver uses the official DUCO robot communication protocol to connect to the
 
 - **ROS2 Control Integration**: Full ros2_control hardware interface implementation
 - **MoveIt2 Support**: Complete MoveIt2 configuration for motion planning
-- **Joint Trajectory Controller**: Execute complex trajectories with position control
+- **Joint Trajectory Controller**: Execute complex trajectories with position control (`arm_1_controller`, active by default)
+- **Direct Position Streaming Controller**: A `forward_command_controller` instance (`forward_position_controller`) is loaded alongside the JTC and stays **inactive by default**. Users activate it on demand and stream `std_msgs/Float64MultiArray` joint targets straight to the position command interface every controller tick — same write pattern as the FZI `cartesian_*_controller` family, just exposed in joint space. See [Direct Position Streaming](#direct-position-streaming-forward_position_controller) below.
 - **Real-time State Monitoring**: Monitor joint positions, velocities, and robot status
 - **Network Communication**: TCP/IP connection to robot controller
 - **RViz Visualization**: Interactive visualization and motion planning interface
@@ -152,15 +153,25 @@ ros2 launch duco_gcr5_910_moveit_config demo.launch.py server_host_1:=<YOUR_ROBO
 Controller parameters are defined in:
 
 ```
-src/duco_gcr5_910_moveit_config/config/ros2_controllers.yaml
+src/duco_gcr5_910_moveit_config/config/ros2_controllers_hardware.yaml
 ```
+
+The submodule launches two arm-level controllers at startup:
+
+| Controller | Type | Default state |
+|---|---|---|
+| `arm_1_controller` | `joint_trajectory_controller/JointTrajectoryController` | **active** |
+| `forward_position_controller` | `forward_command_controller/ForwardCommandController` | **inactive** |
+| `joint_state_broadcaster` | `joint_state_broadcaster/JointStateBroadcaster` | active |
+
+Both arm controllers claim the **same** position command interface, so only one can be active at a time. The trajectory controller wins by default; switch to the forward controller with the service call shown in [Direct Position Streaming](#direct-position-streaming-forward_position_controller).
 
 Key parameters:
 
-- **update_rate**: Control loop frequency (default: 100 Hz)
-- **joints**: List of controlled joints
-- **command_interfaces**: Position control
-- **state_interfaces**: Position and velocity feedback
+- **update_rate**: Control loop frequency (default: 250 Hz)
+- **joints**: List of controlled joints (`arm_1_joint_1` .. `arm_1_joint_6`)
+- **command_interfaces**: `position`
+- **state_interfaces**: `position`, `velocity`
 
 ### URDF Configuration
 
@@ -245,6 +256,111 @@ This will start:
 ```bash
 ros2 control list_controllers
 ros2 control list_hardware_interfaces
+```
+
+Expected output of `list_controllers` right after launch:
+
+```
+joint_state_broadcaster      joint_state_broadcaster/JointStateBroadcaster        active
+arm_1_controller             joint_trajectory_controller/JointTrajectoryController  active
+forward_position_controller  forward_command_controller/ForwardCommandController  inactive
+```
+
+#### Direct Position Streaming (`forward_position_controller`)
+
+The driver ships a `forward_command_controller` instance that bypasses MoveIt's trajectory pipeline and writes user-supplied joint targets directly to the position command interface every controller tick (250 Hz). It is the joint-space analogue of FZI's `cartesian_motion_controller` and is intended for teleoperation, learning policies, or any application that already computes its own joint setpoints. It is loaded **inactive** so the trajectory controller can own the position interface by default.
+
+**Step 1 — Activate it (and deactivate the trajectory controller in the same atomic call):**
+
+```bash
+ros2 control switch_controllers \
+    --deactivate arm_1_controller \
+    --activate   forward_position_controller \
+    --strict --activate-asap
+```
+
+> This is the short CLI form of `ros2 service call /controller_manager/switch_controller ...`; both call the same `SwitchController` service under the hood. Use the verbose service form only when you need to script the full request payload (e.g. for custom `timeout` values).
+
+A successful response is `ok: True`. Confirm with `ros2 control list_controllers`:
+
+```
+arm_1_controller             ... inactive
+forward_position_controller  ... active
+```
+
+**Step 2 — Stream commands.** Publish a `std_msgs/Float64MultiArray` of six floats (radians, ordered `arm_1_joint_1` .. `arm_1_joint_6`) to `/forward_position_controller/commands`. Hold-current-position quick test:
+
+```bash
+# Read the current joint positions and echo them right back at 100 Hz.
+# Replace the array with your own setpoints.
+ros2 topic pub -r 100 /forward_position_controller/commands \
+    std_msgs/msg/Float64MultiArray \
+    "{data: [-2.907, -0.040, -1.502, 1.605, 1.563, -1.641]}"
+```
+
+For a real streaming application use a node that updates the array each tick — the controller writes whatever was last published to the hardware on every controller update. Suggested rate: equal to the controller's `update_rate` (250 Hz). All six joint values **must** be present in every message; the controller does no internal interpolation.
+
+⚠️ **Safety**: There is no trajectory smoothing on this path. A step from the current position to a far target will be executed at maximum joint velocity. Always start a session by publishing the **current** joint positions for the first ~2 seconds and then slowly ramp toward the target. Stop publishing → the controller holds the last received value indefinitely.
+
+**Step 3 — Switch back to the trajectory controller** when you want MoveIt back:
+
+```bash
+ros2 control switch_controllers \
+    --deactivate forward_position_controller \
+    --activate   arm_1_controller \
+    --strict --activate-asap
+```
+
+**Minimal Python publisher (full ramp + sine example):**
+
+```python
+#!/usr/bin/env python3
+"""Stream a 0.1 Hz, 0.1 rad sine on joint 2, smoothly eased in from the
+captured home position. Run with the forward_position_controller active."""
+import math
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import JointState
+from std_msgs.msg import Float64MultiArray
+
+JOINTS = ['arm_1_joint_1', 'arm_1_joint_2', 'arm_1_joint_3',
+          'arm_1_joint_4', 'arm_1_joint_5', 'arm_1_joint_6']
+TARGET_JOINT = 1     # arm_1_joint_2
+AMPLITUDE   = 0.1    # rad
+FREQUENCY   = 0.1    # Hz
+EASE_IN_SEC = 2.0    # smoothly grow amplitude over the first 2 s
+
+class Streamer(Node):
+    def __init__(self):
+        super().__init__('forward_position_streamer')
+        self.pub  = self.create_publisher(Float64MultiArray,
+                                          '/forward_position_controller/commands', 10)
+        self.home = None
+        self.create_subscription(JointState, '/joint_states', self.on_state, 10)
+        self.t0 = self.get_clock().now()
+        self.create_timer(1.0 / 250.0, self.tick)  # match controller update_rate
+
+    def on_state(self, msg):
+        if self.home is None:
+            self.home = [msg.position[msg.name.index(j)] for j in JOINTS]
+            self.get_logger().info(f'Captured home: {self.home}')
+
+    def tick(self):
+        if self.home is None:
+            return
+        t = (self.get_clock().now() - self.t0).nanoseconds * 1e-9
+        ease = min(1.0, 0.5 * (1.0 - math.cos(math.pi * min(t, EASE_IN_SEC) / EASE_IN_SEC)))
+        delta = AMPLITUDE * ease * math.sin(2 * math.pi * FREQUENCY * t)
+        target = list(self.home)
+        target[TARGET_JOINT] += delta
+        self.pub.publish(Float64MultiArray(data=target))
+
+def main():
+    rclpy.init()
+    rclpy.spin(Streamer())
+
+if __name__ == '__main__':
+    main()
 ```
 
 #### 2. Using RViz for Motion Planning
@@ -485,8 +601,10 @@ ros2 control switch_controllers --activate <controller_name>
 |-------|------|-------------|
 | `/joint_states` | `sensor_msgs/JointState` | Current joint positions and velocities |
 | `/robot_description` | `std_msgs/String` | Robot URDF model |
-| `/arm_1_controller/follow_joint_trajectory` | Action | Trajectory execution action server |
+| `/arm_1_controller/follow_joint_trajectory` | Action | Trajectory execution action server (active when `arm_1_controller` is) |
+| `/forward_position_controller/commands` | `std_msgs/Float64MultiArray` | Direct joint-position setpoints (active when `forward_position_controller` is). 6 floats in `arm_1_joint_1` .. `arm_1_joint_6` order, radians. |
 | `/controller_manager/list_controllers` | Service | List available controllers |
+| `/controller_manager/switch_controller` | Service | Activate / deactivate controllers atomically |
 
 ### ROS2 Parameters
 
@@ -687,6 +805,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-**Version**: 1.0.0  
-**Last Updated**: December 2025  
+**Version**: 1.1.0  
+**Last Updated**: May 2026  
 **Maintainer**: yizhongzhang1989

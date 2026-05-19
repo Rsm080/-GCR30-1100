@@ -6,6 +6,21 @@ controller_manager:
     arm_1_controller:
       type: joint_trajectory_controller/JointTrajectoryController
 
+    # FZI-style direct position streaming controller.
+    # Loaded by the bringup as `--inactive`; shares the position command
+    # interface with arm_1_controller (only one can be active at a time).
+    # Activate manually:
+    #   ros2 service call /controller_manager/switch_controller \
+    #     controller_manager_msgs/srv/SwitchController \
+    #     "{activate_controllers: ['forward_position_controller'],
+    #       deactivate_controllers: ['arm_1_controller'],
+    #       strictness: 2, activate_asap: true,
+    #       timeout: {sec: 2, nanosec: 0}}"
+    # Then stream std_msgs/Float64MultiArray (6 radians) to
+    # /forward_position_controller/commands at the controller update rate.
+    forward_position_controller:
+      type: forward_command_controller/ForwardCommandController
+
     joint_state_broadcaster:
       type: joint_state_broadcaster/JointStateBroadcaster
 
@@ -58,3 +73,14 @@ joint_state_broadcaster:
       - arm_1_joint_4
       - arm_1_joint_5
       - arm_1_joint_6
+
+forward_position_controller:
+  ros__parameters:
+    joints:
+      - arm_1_joint_1
+      - arm_1_joint_2
+      - arm_1_joint_3
+      - arm_1_joint_4
+      - arm_1_joint_5
+      - arm_1_joint_6
+    interface_name: position

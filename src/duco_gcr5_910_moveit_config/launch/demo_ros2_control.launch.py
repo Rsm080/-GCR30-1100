@@ -192,6 +192,30 @@ def generate_demo_launch(moveit_config, launch_package_path=None, declared_argum
     )
     ld.add_action(delayed_arm_controller)
 
+    # FZI-style direct position controller - loaded inactive so it shows up
+    # in `ros2 control list_controllers` but does NOT claim the position
+    # command interface (which is owned by arm_1_controller at startup).
+    # Users activate it manually via /controller_manager/switch_controller
+    # and then stream Float64MultiArray to
+    # /forward_position_controller/commands.
+    forward_position_controller_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=[
+            "forward_position_controller",
+            "--controller-manager", "/controller_manager",
+            "--inactive",
+        ],
+    )
+
+    delayed_forward_position_controller = RegisterEventHandler(
+        event_handler=OnProcessStart(
+            target_action=arm_controller_spawner,
+            on_start=[forward_position_controller_spawner],
+        )
+    )
+    ld.add_action(delayed_forward_position_controller)
+
     return ld
 
 
