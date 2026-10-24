@@ -1,5 +1,7 @@
 # DUCO Robot ROS2 Driver
 
+[简体中文](README.md) | **English**
+
 A complete ROS2 driver package for DUCO collaborative robot arms (GCR5-910 model), providing hardware interface integration with MoveIt2 for motion planning and control.
 
 ## Table of Contents
@@ -808,53 +810,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 **Version**: 1.1.0  
 **Last Updated**: May 2026  
 **Maintainer**: yizhongzhang1989
-
----
-
-## 附加工具（本仓库新增）
-
-本仓库在原 DUCO ROS2 驱动的基础上，增加了用于 GCR30-1100 的示教与动力学参数辨识工具。
-
-### 1. PyBullet 示教器 `teach_pendant.py`
-
-```bash
-python3 teach_pendant.py                  # 打开 GUI 示教器
-python3 teach_pendant.py --direct         # 无窗口自检
-python3 teach_pendant.py --base-height 0  # 不抬高底座
-```
-
-- J1~J6 角度滑条（度）与速度倍率
-- 示教点记录 / 回放 / 保存 / 读取（默认 `waypoints/`）
-- 五阶傅立叶激励轨迹播放（`e` 播放/暂停，`E` 停止）
-- 实时显示关节角、TCP 位姿与跟踪误差
-- 根据轨迹 JSON 自动抬高底座并绘制圆柱垫台，避免与地面干涉
-
-### 2. 五阶傅立叶激励轨迹设计 `excitation_trajectory.py`
-
-```bash
-python3 excitation_trajectory.py \
-    --csv trajectories/gcr30_1100_fourier5.csv \
-    --npz trajectories/gcr30_1100_fourier5.npz \
-    --plot trajectories/gcr30_1100_fourier5.png
-```
-
-- 5 阶傅立叶级数，满足位置 / 速度 / 加速度 / 力矩约束
-- 10 参数每连杆刚体回归矩阵，最小化条件数（本机型基参数秩 36，条件数约 5.7）
-- 自动检查离地间隙，并把 `base_height_m` / `pedestal_height_m` 写入 JSON
-- 导出 JSON（示教器读取）、CSV、含回归矩阵 `W` 的 NPZ、轨迹曲线图
-
-### 3. 六张单关节角度图 `plot_joint_motion.py`
-
-```bash
-python3 plot_joint_motion.py
-# -> trajectories/joint_plots/gcr30_1100_fourier5_joint1.png ... joint6.png
-```
-
-每张图显示一个关节的 `q(t)`（单位：度），并标注轨迹中心 `q0` 与关节限位。
-
-### 依赖
-
-```bash
-pip install pybullet numpy scipy matplotlib
-```
-
